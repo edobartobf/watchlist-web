@@ -111,6 +111,19 @@ export class Tmdb {
 
 }
 
+// TMDB ordina per pertinenza. Qui portiamo in cima i film usciti da poco (ultimi 18 mesi)
+// o in uscita nei prossimi 6, perché spesso si aggiunge quello appena uscito al cinema.
+// Dentro ciascun gruppo resta l'ordine di TMDB. I titoli quasi sconosciuti (popolarità
+// sotto 3) non salgono, così un omonimo oscuro non scavalca il film cercato.
+const DAY = 864e5;
+export function rankResults(list, now = Date.now()) {
+  const recent = (r) => {
+    const t = Date.parse(r.release_date || "");
+    return t >= now - 548 * DAY && t <= now + 180 * DAY && (r.popularity || 0) >= 3;
+  };
+  return [...list.filter(recent), ...list.filter((r) => !recent(r))];
+}
+
 // Regole di default: le stesse di scripts/check_availability.py nel repo dei dati.
 // Se data/db.json ha "settings.providers", vincono quelle.
 export const DEFAULT_RULES = {

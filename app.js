@@ -1,5 +1,5 @@
 import { decryptVault } from "./vault.js";
-import { GitHubStore, Tmdb, IMG, pickProviders, DEFAULT_RULES } from "./api.js";
+import { GitHubStore, Tmdb, IMG, pickProviders, DEFAULT_RULES, rankResults } from "./api.js";
 import { DemoStore, DemoTmdb } from "./demo.js";
 
 // config.js si carica qui e non con un tag <script>: GitHub Pages fa tenere i file
@@ -546,7 +546,7 @@ async function runSearch(text) {
   const seq = ++searchSeq;
   $("#q-spin").hidden = false;
   try {
-    const list = (await tmdb.search(text)).slice(0, 10);
+    const list = rankResults(await tmdb.search(text)).slice(0, 10);
     if (seq !== searchSeq) return;
     items = list;
     const user = currentUser();
