@@ -2,7 +2,18 @@ import { decryptVault } from "./vault.js";
 import { GitHubStore, Tmdb, IMG, pickProviders } from "./api.js";
 import { DemoStore, DemoTmdb } from "./demo.js";
 
-const cfg = window.WATCHLIST_CONFIG || {};
+// config.js si carica qui e non con un tag <script>: GitHub Pages fa tenere i file
+// in cache fino a 10 minuti, e dopo aver rigenerato i token servirebbe Ctrl+Shift+R.
+async function loadConfig() {
+  await new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.src = `config.js?t=${Date.now()}`;
+    s.onload = s.onerror = resolve;
+    document.head.append(s);
+  });
+  return window.WATCHLIST_CONFIG || {};
+}
+const cfg = await loadConfig();
 const SECRETS_KEY = "watchlist.secrets";
 const USER_KEY = "watchlist.user";
 const DEMO = new URLSearchParams(location.search).has("demo");
