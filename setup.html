@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Watchlist setup</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .setup { max-width: 620px; margin: 0 auto; padding: 32px 16px 48px; display: grid; gap: 18px; }
+    .setup h1 { font-size: 24px; }
+    .box { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 20px; display: grid; gap: 14px; }
+    .box h2 { font-size: 16px; }
+    .box p, .box li { font-size: 14px; margin: 0; }
+    .box ol { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    textarea { font: 12.5px/1.5 ui-monospace, monospace; width: 100%; min-height: 220px; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg); color: var(--text); }
+    .log { font-size: 14px; display: grid; gap: 4px; }
+    .log .ok { color: var(--ok); } .log .ko { color: var(--danger); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="setup">
+    <div>
+      <h1>🎬 Configurazione</h1>
+      <p class="muted">Qui cifri i token con la master password e generi <code>config.js</code>. Tutto avviene nel browser: niente viene inviato da nessuna parte tranne le due chiamate di verifica a GitHub e TMDB.</p>
+    </div>
+
+    <form id="f" class="box">
+      <h2>1. Repository dei dati</h2>
+      <div class="grid2">
+        <label class="field"><span>Repo (owner/nome)</span><input id="repo" required></label>
+        <label class="field"><span>Branch</span><input id="branch" required></label>
+      </div>
+
+      <h2>2. Token</h2>
+      <ol>
+        <li>GitHub → Settings → Developer settings → <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Fine-grained token</a>: solo il repo dei dati, permessi <b>Contents: Read and write</b> e <b>Actions: Read and write</b> (per «Controlla ora»).</li>
+        <li>TMDB → Settings → <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">API</a>: «API Read Access Token».</li>
+      </ol>
+      <label class="field"><span>Token GitHub</span><input id="gh" type="password" autocomplete="off" required placeholder="github_pat_…"></label>
+      <label class="field"><span>Token TMDB</span><input id="tmdb" type="password" autocomplete="off" required placeholder="eyJhbGciOi…"></label>
+
+      <h2>3. Master password</h2>
+      <p class="muted">config.js è pubblico: chi lo scarica può provare password a ripetizione. Usa una frase lunga (almeno 4–5 parole).</p>
+      <div class="grid2">
+        <label class="field"><span>Master password</span><input id="pw1" type="password" autocomplete="new-password" minlength="12" required></label>
+        <label class="field"><span>Ripeti</span><input id="pw2" type="password" autocomplete="new-password" required></label>
+      </div>
+      <div id="log" class="log"></div>
+      <button class="btn primary" type="submit" id="go">Verifica e genera config.js</button>
+    </form>
+
+    <section id="out" class="box" hidden>
+      <h2>4. Pubblica</h2>
+      <p>Sostituisci <code>config.js</code> nel repo della pagina con questo contenuto, poi fai commit e push.</p>
+      <textarea id="code" readonly></textarea>
+      <div class="row">
+        <button class="btn primary" id="copy" type="button">Copia</button>
+        <button class="btn ghost" id="dl" type="button">Scarica config.js</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="config.js"></script>
+  <script type="module">
+    import { encryptVault, decryptVault } from "./vault.js";
+    const $ = (s) => document.querySelector(s);
+    const cfg = window.WATCHLIST_CONFIG || {};
+    $("#repo").value = cfg.repo || "";
+    $("#branch").value = cfg.branch || "main";
+
+    const log = (msg, ok) => $("#log").append(Object.assign(document.createElement("div"), { className: ok ? "ok" : "ko", textContent: (ok ? "✓ " : "✗ ") + msg }));
+
+    $("#f").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("#log").replaceChildren();
+      $("#out").hidden = true;
+      if ($("#pw1").value !== $("#pw2").value) return log("Le due password non coincidono", false);
+      const repo = $("#repo").value.trim(), branch = $("#branch").value.trim();
+      const dbPath = cfg.dbPath || "data/db.json";
+      const gh = $("#gh").value.trim(), tm = $("#tmdb").value.trim();
+      $("#go").disabled = true;
+      try {
+        const r1 = await fetch(`https://api.github.com/repos/${repo}/contents/${dbPath}?ref=${encodeURIComponent(branch)}`, { cache: "no-store", headers: { Authorization: `Bearer ${gh}`, Accept: "application/vnd.github+json" } });
+        if (!r1.ok) return log(`GitHub: ${r1.status} leggendo ${repo}/${dbPath}. Controlla repo, branch e permessi del token.`, false);
+        log(`GitHub: ${dbPath} leggibile`, true);
+        const r2 = await fetch("https://api.themoviedb.org/3/configuration", { headers: { Authorization: `Bearer ${tm}` } });
+        if (!r2.ok) return log(`TMDB: ${r2.status}. Serve il «Read Access Token», non la API key corta.`, false);
+        log("TMDB: token valido", true);
+
+        const vault = await encryptVault({ github_token: gh, tmdb_token: tm }, $("#pw1").value);
+        await decryptVault(vault, $("#pw1").value); // verifica a giro completo
+        log("Token cifrati", true);
+
+        const code = `// Generato da setup.html il ${new Date().toLocaleString("it-IT")}.
+// Il blocco "vault" contiene i token GitHub e TMDB cifrati con la master password
+// (PBKDF2-SHA256 ${vault.iterations} iterazioni + AES-GCM): senza la password non servono a niente.
+window.WATCHLIST_CONFIG = ${JSON.stringify({ repo, branch, dbPath, workflow: cfg.workflow || "check-streaming.yml", vault }, null, 2)};
+`;
+        $("#code").value = code;
+        $("#out").hidden = false;
+        $("#out").scrollIntoView({ behavior: "smooth" });
+      } catch (ex) {
+        log(ex.message, false);
+      } finally {
+        $("#go").disabled = false;
+      }
+    });
+
+    $("#copy").addEventListener("click", async () => {
+      await navigator.clipboard.writeText($("#code").value);
+      $("#copy").textContent = "Copiato";
+    });
+    $("#dl").addEventListener("click", () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([$("#code").value], { type: "text/javascript" }));
+      a.download = "config.js";
+      a.click();
+    });
+  </script>
+</body>
+</html>

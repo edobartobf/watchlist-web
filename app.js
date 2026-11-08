@@ -1,0 +1,578 @@
+import { decryptVault } from "./vault.js";
+import { GitHubStore, Tmdb, IMG, pickProviders } from "./api.js";
+import { DemoStore, DemoTmdb } from "./demo.js";
+
+const cfg = window.WATCHLIST_CONFIG || {};
+const SECRETS_KEY = "watchlist.secrets";
+const USER_KEY = "watchlist.user";
+const DEMO = new URLSearchParams(location.search).has("demo");
+
+const $ = (s) => document.querySelector(s);
+const state = { db: null, userId: null, filter: "all", info: new Map(), busy: false };
+let store, tmdb;
+
+// ---------- utilità ----------
+
+function el(tag, attrs = {}, ...children) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) if (c != null && c !== false) n.append(c);
+  return n;
+}
+
+const fmtDate = (iso) => (iso ? new Date(iso + "T12:00:00").toLocaleDateString("it-IT", { day: "numeric", month: "short", year: "numeric" }) : "");
+const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD locale
+const yearOf = (d) => (d ? Number(String(d).slice(0, 4)) || null : null);
+
+let toastTimer;
+function toast(msg, isErr = false) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.toggle("err", isErr);
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), isErr ? 6000 : 3500);
+}
+
+function poster(path, title, size = "w185", cls = "poster") {
+  if (path) return el("img", { class: cls, src: IMG + size + path, alt: "", loading: "lazy" });
+  const initials = (title || "?").replace(/[^\p{L}\p{N} ]/gu, "").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
+  return el("div", { class: cls, "aria-hidden": "true" }, initials || "?");
+}
+
+function slug(name) {
+  const base = name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "utente";
+  return base;
+}
+
+function confirmDialog(title, text, okLabel = "Conferma") {
+  const dlg = $("#dlg-confirm");
+  $("#confirm-title").textContent = title;
+  $("#confirm-text").textContent = text;
+  $("#confirm-ok").textContent = okLabel;
+  dlg.showModal();
+  return new Promise((resolve) => {
+    const ok = () => { cleanup(); dlg.close(); resolve(true); };
+    const close = () => { cleanup(); resolve(false); };
+    const cleanup = () => { $("#confirm-ok").removeEventListener("click", ok); dlg.removeEventListener("close", close); };
+    $("#confirm-ok").addEventListener("click", ok);
+    dlg.addEventListener("close", close);
+  });
+}
+
+// ---------- accesso ----------
+
+function readSecrets() {
+  try {
+    const s = sessionStorage.getItem(SECRETS_KEY) || localStorage.getItem(SECRETS_KEY);
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSecrets(secrets, remember) {
+  try {
+    (remember ? localStorage : sessionStorage).setItem(SECRETS_KEY, JSON.stringify(secrets));
+  } catch {}
+}
+
+function logout() {
+  try {
+    sessionStorage.removeItem(SECRETS_KEY);
+    localStorage.removeItem(SECRETS_KEY);
+  } catch {}
+  location.href = location.pathname;
+}
+
+function showLogin(message) {
+  $("#app").hidden = true;
+  $("#login").hidden = false;
+  const err = $("#login-error");
+  if (!cfg.vault) {
+    err.textContent = "Configurazione mancante: genera config.js con setup.html.";
+    err.hidden = false;
+    $("#login-btn").disabled = true;
+    return;
+  }
+  err.hidden = !message;
+  err.textContent = message || "";
+  $("#login-pw").focus();
+}
+
+$("#login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#login-btn");
+  const err = $("#login-error");
+  btn.disabled = true;
+  btn.textContent = "Verifico…";
+  err.hidden = true;
+  try {
+    const secrets = await decryptVault(cfg.vault, $("#login-pw").value);
+    writeSecrets(secrets, $("#login-remember").checked);
+    await start(secrets);
+  } catch (ex) {
+    err.textContent = ex.message;
+    err.hidden = false;
+    $("#login-pw").select();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Entra";
+  }
+});
+
+// ---------- dati ----------
+
+function currentUser() {
+  return state.db?.users.find((u) => u.id === state.userId) || null;
+}
+
+async function reload() {
+  state.db = await store.load();
+  if (!currentUser()) state.userId = state.db.users[0]?.id || null;
+  render();
+}
+
+// Applica una modifica e la salva; se nel frattempo qualcun altro ha salvato
+// (conflitto di sha), ricarica e riapplica la modifica.
+async function mutate(change, message) {
+  if (state.busy) throw new Error("Attendi il salvataggio in corso");
+  state.busy = true;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const db = attempt === 0 ? structuredClone(state.db) : await store.load();
+      change(db);
+      try {
+        await store.save(db, message);
+        state.db = db;
+        render();
+        return;
+      } catch (e) {
+        if ((e.status === 409 || e.status === 422) && attempt < 3) continue;
+        throw e;
+      }
+    }
+  } finally {
+    state.busy = false;
+  }
+}
+
+function handleError(e) {
+  console.error(e);
+  if (e.status === 401) return logout();
+  toast(e.message || "Qualcosa è andato storto", true);
+}
+
+// Dettagli + disponibilità da TMDB, in cache per la sessione.
+function info(id) {
+  if (!state.info.has(id)) {
+    const p = tmdb.details(id).then((d) => ({
+      poster_path: d.poster_path,
+      original_title: d.original_title,
+      providers: pickProviders(d["watch/providers"]?.results),
+    }));
+    p.catch(() => state.info.delete(id));
+    state.info.set(id, p);
+  }
+  return state.info.get(id);
+}
+
+// ---------- rendering ----------
+
+function render() {
+  renderTabs();
+  renderList();
+}
+
+function renderTabs() {
+  const nav = $("#user-tabs");
+  nav.replaceChildren(
+    ...state.db.users.map((u) =>
+      el("button", {
+        class: "tab", role: "tab", "aria-selected": String(u.id === state.userId),
+        onclick: () => selectUser(u.id),
+      }, u.name, el("span", { class: "n" }, String(u.movies.length))),
+    ),
+    el("button", { class: "tab add", onclick: openUsers, title: "Aggiungi o elimina utenti" }, "+ Utente"),
+  );
+}
+
+function selectUser(id) {
+  state.userId = id;
+  try { localStorage.setItem(USER_KEY, id); } catch {}
+  render();
+}
+
+function isAvailable(m) {
+  const cached = state.info.get(m.tmdb_id);
+  return Boolean(m.notified) || Boolean(cached?.resolved?.providers.list.length);
+}
+
+function renderList() {
+  const user = currentUser();
+  const grid = $("#movies");
+  const empty = $("#empty");
+  document.querySelectorAll(".seg button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.filter === state.filter)));
+
+  if (!user) {
+    $("#list-title").textContent = "Nessun utente";
+    grid.replaceChildren();
+    empty.hidden = false;
+    empty.replaceChildren(el("strong", {}, "Crea il primo utente"), "Ogni utente ha la sua watchlist.", el("div", { style: "margin-top:14px" }, el("button", { class: "btn primary", onclick: openUsers }, "Crea utente")));
+    $("#q").disabled = true;
+    return;
+  }
+  $("#q").disabled = false;
+  $("#q").placeholder = `Aggiungi un film per ${user.name}…`;
+  $("#list-title").textContent = `La lista di ${user.name}`;
+
+  const movies = [...user.movies]
+    .sort((a, b) => (b.added_date || "").localeCompare(a.added_date || ""))
+    .filter((m) => state.filter === "all" || (state.filter === "available") === isAvailable(m));
+
+  grid.replaceChildren(...movies.map((m) => card(user, m)));
+  empty.hidden = movies.length > 0;
+  if (!movies.length) {
+    empty.replaceChildren(
+      ...(user.movies.length
+        ? [el("strong", {}, "Niente qui"), "Nessun film corrisponde al filtro."]
+        : [el("strong", {}, "La lista è vuota"), "Cerca un film qui sopra: ti avviso via mail quando arriva in streaming."]),
+    );
+  }
+}
+
+function card(user, m) {
+  const pos = el("div", {}, poster(m.poster_path, m.title));
+  const status = el("div", { class: "status" }, el("span", { class: "skeleton" }));
+  const tmdbUrl = `https://www.themoviedb.org/movie/${m.tmdb_id}`;
+  const sub = [m.year, m.original_title && m.original_title !== m.title ? m.original_title : null].filter(Boolean).join(" · ");
+
+  const node = el("article", { class: "card" },
+    pos,
+    el("div", { class: "card-main" },
+      el("div", { class: "card-top" },
+        el("div", { class: "card-title" }, el("a", { href: tmdbUrl, target: "_blank", rel: "noopener" }, m.title)),
+        el("button", { class: "icon-btn", title: "Togli dalla lista", "aria-label": `Togli ${m.title} dalla lista`, onclick: () => removeMovie(user, m) }, "🗑"),
+      ),
+      sub ? el("div", { class: "card-sub" }, sub) : null,
+      el("div", { class: "card-sub" }, `Aggiunto il ${fmtDate(m.added_date)}`),
+      status,
+    ),
+  );
+
+  info(m.tmdb_id)
+    .then((i) => {
+      state.info.get(m.tmdb_id).resolved = i;
+      if (!m.poster_path && i.poster_path) pos.replaceChildren(poster(i.poster_path, m.title));
+      status.replaceChildren(...statusBits(m, i.providers));
+    })
+    .catch(() => status.replaceChildren(...statusBits(m, null)));
+  return node;
+}
+
+function providerChips(list) {
+  return el("span", { class: "prov-list" }, list.map((p) =>
+    el("span", { class: "prov", title: p.type === "free" ? "Gratis" : "Abbonamento" },
+      p.logo ? el("img", { src: IMG + "w45" + p.logo, alt: "" }) : null, p.name)));
+}
+
+function statusBits(m, prov) {
+  if (prov?.list.length) {
+    return [el("span", { class: "badge ok" }, "In streaming"), providerChips(prov.list)];
+  }
+  if (m.notified) {
+    return [el("span", { class: "badge ok", title: `Notificato il ${fmtDate(m.notified.date)}` }, `Era su ${m.notified.providers.join(", ")}`)];
+  }
+  const bits = [el("span", { class: "badge wait" }, "In attesa")];
+  if (prov?.rentOrBuy) bits.push(el("span", { class: "card-sub" }, "per ora solo noleggio/acquisto"));
+  return bits;
+}
+
+// ---------- azioni ----------
+
+async function removeMovie(user, m) {
+  const ok = await confirmDialog("Togliere il film?", `«${m.title}» esce dalla lista di ${user.name}.`, "Togli");
+  if (!ok) return;
+  try {
+    await mutate((db) => {
+      const u = db.users.find((x) => x.id === user.id);
+      if (u) u.movies = u.movies.filter((x) => x.tmdb_id !== m.tmdb_id);
+    }, `web: ${user.name} toglie "${m.title}"`);
+    toast(`«${m.title}» tolto dalla lista`);
+  } catch (e) {
+    handleError(e);
+  }
+}
+
+async function addMovie(user, d, prov) {
+  const entry = {
+    tmdb_id: d.id,
+    title: d.title,
+    original_title: d.original_title,
+    year: yearOf(d.release_date),
+    poster_path: d.poster_path || null,
+    added_date: today(),
+  };
+  // Già in streaming: lo sai già, niente mail domani.
+  if (prov.list.length) entry.notified = { date: today(), providers: prov.list.map((p) => p.name), on_add: true };
+  await mutate((db) => {
+    const u = db.users.find((x) => x.id === user.id);
+    if (!u) throw new Error("Utente non trovato: forse è stato eliminato");
+    if (!u.movies.some((x) => x.tmdb_id === d.id)) u.movies.push(entry);
+  }, `web: ${user.name} aggiunge "${d.title}"`);
+  toast(`«${d.title}» aggiunto alla lista di ${user.name}`);
+}
+
+$("#btn-check").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try {
+    await store.runCheck();
+    toast("Controllo avviato: se c'è qualcosa di nuovo la mail arriva tra un paio di minuti.");
+  } catch (ex) {
+    if (ex.status === 403 || ex.status === 404) toast("Il token GitHub non ha il permesso «Actions: read and write».", true);
+    else handleError(ex);
+  } finally {
+    setTimeout(() => (btn.disabled = false), 4000);
+  }
+});
+
+$("#btn-logout").addEventListener("click", logout);
+$("#btn-users").addEventListener("click", openUsers);
+document.querySelectorAll(".seg button").forEach((b) =>
+  b.addEventListener("click", () => { state.filter = b.dataset.filter; renderList(); }));
+document.querySelectorAll("dialog [data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
+document.querySelectorAll("dialog").forEach((d) => d.addEventListener("click", (e) => { if (e.target === d) d.close(); }));
+
+// ---------- utenti ----------
+
+function openUsers() {
+  renderUsers();
+  $("#dlg-users").showModal();
+  $("#user-name").focus();
+}
+
+function renderUsers() {
+  $("#users-list").replaceChildren(...state.db.users.map((u) =>
+    el("li", {},
+      el("span", { class: "u-name" }, u.name),
+      el("span", { class: "u-n" }, u.movies.length === 1 ? "1 film" : `${u.movies.length} film`),
+      el("button", { class: "icon-btn", title: "Elimina utente", "aria-label": `Elimina ${u.name}`, onclick: () => removeUser(u) }, "🗑"),
+    )));
+  if (!state.db.users.length) $("#users-list").append(el("li", { class: "muted" }, "Nessun utente"));
+}
+
+$("#user-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("#user-name").value.trim();
+  if (!name) return;
+  if (state.db.users.some((u) => u.name.toLowerCase() === name.toLowerCase())) return toast(`Esiste già un utente «${name}»`, true);
+  let id;
+  try {
+    await mutate((db) => {
+      const base = slug(name);
+      id = base;
+      for (let i = 2; db.users.some((u) => u.id === id); i++) id = `${base}-${i}`;
+      db.users.push({ id, name, created: today(), movies: [] });
+    }, `web: nuovo utente ${name}`);
+    $("#user-name").value = "";
+    renderUsers();
+    selectUser(id);
+    toast(`Utente ${name} creato`);
+  } catch (ex) {
+    handleError(ex);
+  }
+});
+
+async function removeUser(u) {
+  $("#dlg-users").close();
+  const n = u.movies.length;
+  const ok = await confirmDialog(`Eliminare ${u.name}?`, n ? `Si perde anche la sua lista (${n} film).` : "La sua lista è vuota.", "Elimina");
+  if (!ok) return openUsers();
+  try {
+    await mutate((db) => { db.users = db.users.filter((x) => x.id !== u.id); }, `web: elimina utente ${u.name}`);
+    if (state.userId === u.id) state.userId = state.db.users[0]?.id || null;
+    render();
+    toast(`${u.name} eliminato`);
+  } catch (ex) {
+    handleError(ex);
+  }
+}
+
+// ---------- ricerca e conferma ----------
+
+const q = $("#q");
+const results = $("#results");
+let searchTimer, searchSeq = 0, active = -1, items = [];
+
+function closeResults() {
+  results.hidden = true;
+  q.setAttribute("aria-expanded", "false");
+  active = -1;
+}
+
+function setActive(i) {
+  const lis = [...results.querySelectorAll("li[role=option]")];
+  if (!lis.length) return;
+  active = (i + lis.length) % lis.length;
+  lis.forEach((li, j) => li.setAttribute("aria-selected", String(j === active)));
+  lis[active].scrollIntoView({ block: "nearest" });
+}
+
+q.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const text = q.value.trim();
+  if (text.length < 2) { closeResults(); $("#q-spin").hidden = true; return; }
+  searchTimer = setTimeout(() => runSearch(text), 280);
+});
+
+async function runSearch(text) {
+  const seq = ++searchSeq;
+  $("#q-spin").hidden = false;
+  try {
+    const list = (await tmdb.search(text)).slice(0, 10);
+    if (seq !== searchSeq) return;
+    items = list;
+    const user = currentUser();
+    const have = new Set(user?.movies.map((m) => m.tmdb_id));
+    results.replaceChildren(...(list.length
+      ? list.map((r, i) => el("li", { role: "option", id: `opt-${i}`, onmousedown: (e) => { e.preventDefault(); pick(i); } },
+          poster(r.poster_path, r.title, "w92", "r-poster poster"),
+          el("div", { class: "r-main" },
+            el("div", { class: "r-title" }, r.title, r.release_date ? ` (${r.release_date.slice(0, 4)})` : ""),
+            el("div", { class: "r-sub" }, r.original_title && r.original_title !== r.title ? r.original_title : (r.overview || "").slice(0, 90) || " "),
+          ),
+          have.has(r.id) ? el("span", { class: "tag" }, "in lista") : null))
+      : [el("li", { class: "none" }, "Nessun film trovato. Prova col titolo originale o aggiungi l'anno.")]));
+    results.hidden = false;
+    q.setAttribute("aria-expanded", "true");
+    active = -1;
+    if (list.length) setActive(0);
+  } catch (e) {
+    if (seq === searchSeq) handleError(e);
+  } finally {
+    if (seq === searchSeq) $("#q-spin").hidden = true;
+  }
+}
+
+q.addEventListener("keydown", (e) => {
+  if (results.hidden) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); setActive(active + 1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); setActive(active - 1); }
+  else if (e.key === "Enter" && active >= 0 && items[active]) { e.preventDefault(); pick(active); }
+  else if (e.key === "Escape") closeResults();
+});
+q.addEventListener("blur", () => setTimeout(closeResults, 120));
+q.addEventListener("focus", () => { if (results.children.length && q.value.trim().length >= 2) { results.hidden = false; q.setAttribute("aria-expanded", "true"); } });
+
+async function pick(i) {
+  const r = items[i];
+  const user = currentUser();
+  if (!r || !user) return;
+  closeResults();
+  q.blur();
+  const body = $("#add-body");
+  body.replaceChildren(detailView(r, null, user));
+  $("#dlg-add").showModal();
+  try {
+    const d = await tmdb.details(r.id);
+    if (!$("#dlg-add").open) return;
+    body.replaceChildren(detailView(d, pickProviders(d["watch/providers"]?.results), user));
+  } catch (e) {
+    $("#dlg-add").close();
+    handleError(e);
+  }
+}
+
+function detailView(d, prov, user) {
+  const already = user.movies.some((m) => m.tmdb_id === d.id);
+  const director = d.credits?.crew?.filter((c) => c.job === "Director").map((c) => c.name).join(", ");
+  const meta = [d.release_date ? fmtDate(d.release_date) : "data sconosciuta", d.runtime ? `${d.runtime} min` : null].filter(Boolean).join(" · ");
+
+  let avail;
+  if (!prov) avail = el("div", { class: "avail" }, el("span", { class: "skeleton", style: "width:60%" }));
+  else if (prov.list.length)
+    avail = el("div", { class: "avail ok" },
+      el("div", {}, el("strong", {}, "È già in streaming in Italia"), "Puoi guardarlo subito; se lo aggiungi lo stesso non ti arriva la mail."),
+      providerChips(prov.list));
+  else
+    avail = el("div", { class: "avail wait" },
+      el("div", {}, el("strong", {}, "Non ancora in streaming in Italia"),
+        prov.rentOrBuy ? "Per ora c'è solo a noleggio o acquisto. " : "",
+        "Ti arriva una mail quando esce su una piattaforma in abbonamento o gratis."));
+
+  const addBtn = el("button", { class: "btn primary", disabled: already || !prov ? true : null }, already ? "Già nella lista" : `Aggiungi alla lista di ${user.name}`);
+  addBtn.addEventListener("click", async () => {
+    addBtn.disabled = true;
+    addBtn.textContent = "Salvo…";
+    try {
+      await addMovie(user, d, prov);
+      $("#dlg-add").close();
+      q.value = "";
+      results.replaceChildren();
+    } catch (e) {
+      handleError(e);
+      addBtn.disabled = false;
+      addBtn.textContent = `Aggiungi alla lista di ${user.name}`;
+    }
+  });
+
+  return el("div", {},
+    el("div", { class: "detail" },
+      poster(d.poster_path, d.title, "w342"),
+      el("div", { class: "detail-main" },
+        el("h3", {}, d.title),
+        d.original_title && d.original_title !== d.title ? el("div", { class: "muted small" }, d.original_title) : null,
+        el("div", { class: "muted small" }, meta),
+        director ? el("div", { class: "small" }, "Regia di ", el("strong", {}, director)) : null,
+        d.overview ? el("p", { class: "overview" }, d.overview) : null,
+        el("a", { class: "small muted", href: `https://www.themoviedb.org/movie/${d.id}`, target: "_blank", rel: "noopener" }, "Scheda su TMDB ↗"),
+      ),
+    ),
+    avail,
+    el("div", { class: "actions" },
+      el("button", { class: "btn ghost", onclick: () => $("#dlg-add").close() }, "Non è questo"),
+      addBtn,
+    ),
+  );
+}
+
+// ---------- avvio ----------
+
+async function start(secrets) {
+  if (DEMO) {
+    store = new DemoStore();
+    tmdb = new DemoTmdb();
+  } else {
+    store = new GitHubStore(cfg, secrets.github_token);
+    tmdb = new Tmdb(secrets.tmdb_token);
+  }
+  try { state.userId = localStorage.getItem(USER_KEY); } catch {}
+  $("#login").hidden = true;
+  $("#app").hidden = false;
+  if (DEMO) document.title = "Watchlist (demo)";
+  try {
+    await reload();
+  } catch (e) {
+    if (e.status === 401) return showLogin("Il token GitHub non è più valido: rigenera config.js con setup.html.");
+    if (e.status === 404) return showLogin(`Non trovo ${cfg.dbPath} in ${cfg.repo}: controlla config.js e i permessi del token.`);
+    handleError(e);
+  }
+}
+
+// Ricarica quando si torna sulla pagina (es. modifiche da un altro dispositivo).
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && state.db && !state.busy && !document.querySelector("dialog[open]")) {
+    reload().catch(handleError);
+  }
+});
+
+const saved = readSecrets();
+if (DEMO) start({});
+else if (saved) start(saved);
+else showLogin();
