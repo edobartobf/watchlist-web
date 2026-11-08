@@ -109,24 +109,41 @@ export class Tmdb {
     return this.get(`/movie/${id}`, { append_to_response: "watch/providers,credits" });
   }
 
-  async providers(id) {
-    const data = await this.get(`/movie/${id}/watch/providers`, { language: "" });
-    return pickProviders(data.results);
-  }
 }
 
-// Solo abbonamento e gratis (come lo script giornaliero), senza doppioni.
-export function pickProviders(results) {
+// Regole di default: le stesse di scripts/check_availability.py nel repo dei dati.
+// Se data/db.json ha "settings.providers", vincono quelle.
+export const DEFAULT_RULES = {
+  wanted: ["Netflix", "Amazon Prime Video", "Disney Plus", "HBO Max", "Max", "Timvision"],
+  watch_only: ["Sky Go", "Now TV", "Sky", "Apple TV"],
+  free: true,
+};
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function matches(name, patterns) {
+  const n = name.toLowerCase();
+  if (n.includes("channel")) return false;
+  return patterns.some((p) => new RegExp(`^${escapeRe(p.toLowerCase())}(?![a-z0-9])`).test(n));
+}
+
+// Divide le piattaforme in Italia in:
+//   wanted    chiudono l'attesa (abbonamenti scelti o gratis)
+//   watchOnly da segnalare ma si continua ad aspettare (Sky)
+//   other     abbonamenti che non contano (es. canali Amazon, MUBI)
+export function pickProviders(results, rules = DEFAULT_RULES) {
   const c = (results || {})[COUNTRY] || {};
   const seen = new Set();
-  const list = [];
-  for (const cat of ["flatrate", "free"]) {
-    for (const p of c[cat] || []) {
-      if (seen.has(p.provider_id)) continue;
-      seen.add(p.provider_id);
-      list.push({ id: p.provider_id, name: p.provider_name, logo: p.logo_path, type: cat });
-    }
+  const out = { wanted: [], watchOnly: [], other: [] };
+  const add = (bucket, p, type) => {
+    if (seen.has(p.provider_id)) return;
+    seen.add(p.provider_id);
+    out[bucket].push({ id: p.provider_id, name: p.provider_name, logo: p.logo_path, type });
+  };
+  for (const p of c.flatrate || []) {
+    add(matches(p.provider_name, rules.wanted) ? "wanted" : matches(p.provider_name, rules.watch_only) ? "watchOnly" : "other", p, "flatrate");
   }
-  const other = [...(c.rent || []), ...(c.buy || [])].length > 0;
-  return { list, link: c.link || null, rentOrBuy: other };
+  for (const cat of ["free", "ads"]) for (const p of c[cat] || []) add(rules.free ? "wanted" : "other", p, "free");
+  out.link = c.link || null;
+  out.rentOrBuy = [...(c.rent || []), ...(c.buy || [])].length > 0;
+  return out;
 }

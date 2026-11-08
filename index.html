@@ -59,10 +59,13 @@
       <section aria-labelledby="list-title">
         <div class="list-head">
           <h2 id="list-title"></h2>
+          <div class="list-tools">
+          <button class="btn ghost sm" id="btn-select" hidden>Seleziona</button>
           <div class="seg" role="radiogroup" aria-label="Filtro">
             <button role="radio" data-filter="all">Tutti</button>
             <button role="radio" data-filter="waiting">In attesa</button>
             <button role="radio" data-filter="available">Disponibili</button>
+          </div>
           </div>
         </div>
         <div id="movies" class="grid"></div>
@@ -71,10 +74,20 @@
     </main>
 
     <footer class="foot wrap">
-      Disponibilità in Italia (abbonamento o gratis) da JustWatch tramite
+      Conta l'arrivo in Italia su Netflix, Prime Video, Disney+, HBO Max, Timvision o su una piattaforma gratuita;
+      Sky, Now e Apple TV vengono segnalati ma l'attesa continua. Dati JustWatch tramite
       <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">TMDB</a>.
       Controllo automatico ogni mattina; le notifiche arrivano a un'unica mail.
     </footer>
+
+    <div id="select-bar" class="select-bar" hidden>
+      <span id="select-count"></span>
+      <div class="select-actions">
+        <button class="btn ghost sm" id="select-all">Tutti</button>
+        <button class="btn ghost sm" id="select-cancel">Annulla</button>
+        <button class="btn danger sm" id="select-del" disabled>Togli</button>
+      </div>
+    </div>
   </div>
 
   <!-- Conferma aggiunta -->

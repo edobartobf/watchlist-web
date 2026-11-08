@@ -1,5 +1,5 @@
 import { decryptVault } from "./vault.js";
-import { GitHubStore, Tmdb, IMG, pickProviders } from "./api.js";
+import { GitHubStore, Tmdb, IMG, pickProviders, DEFAULT_RULES } from "./api.js";
 import { DemoStore, DemoTmdb } from "./demo.js";
 
 // config.js si carica qui e non con un tag <script>: GitHub Pages fa tenere i file
@@ -19,7 +19,7 @@ const USER_KEY = "watchlist.user";
 const DEMO = new URLSearchParams(location.search).has("demo");
 
 const $ = (s) => document.querySelector(s);
-const state = { db: null, userId: null, filter: "all", info: new Map(), busy: false };
+const state = { db: null, userId: null, filter: "all", info: new Map(), busy: false, selecting: false, selected: new Set() };
 let store, tmdb;
 
 // ---------- utilità ----------
@@ -179,13 +179,18 @@ function handleError(e) {
   toast(e.message || "Qualcosa è andato storto", true);
 }
 
+// Regole sulle piattaforme: quelle in db.json, altrimenti i default.
+function rules() {
+  return { ...DEFAULT_RULES, ...(state.db?.settings?.providers || {}) };
+}
+
 // Dettagli + disponibilità da TMDB, in cache per la sessione.
 function info(id) {
   if (!state.info.has(id)) {
     const p = tmdb.details(id).then((d) => ({
       poster_path: d.poster_path,
       original_title: d.original_title,
-      providers: pickProviders(d["watch/providers"]?.results),
+      providers: pickProviders(d["watch/providers"]?.results, rules()),
     }));
     p.catch(() => state.info.delete(id));
     state.info.set(id, p);
@@ -214,6 +219,7 @@ function renderTabs() {
 }
 
 function selectUser(id) {
+  if (id !== state.userId) stopSelecting();
   state.userId = id;
   try { localStorage.setItem(USER_KEY, id); } catch {}
   render();
@@ -221,7 +227,13 @@ function selectUser(id) {
 
 function isAvailable(m) {
   const cached = state.info.get(m.tmdb_id);
-  return Boolean(m.notified) || Boolean(cached?.resolved?.providers.list.length);
+  return Boolean(m.notified) || Boolean(cached?.resolved?.providers.wanted.length);
+}
+
+function visibleMovies(user) {
+  return [...user.movies]
+    .sort((a, b) => (b.added_date || "").localeCompare(a.added_date || ""))
+    .filter((m) => state.filter === "all" || (state.filter === "available") === isAvailable(m));
 }
 
 function renderList() {
@@ -233,19 +245,24 @@ function renderList() {
   if (!user) {
     $("#list-title").textContent = "Nessun utente";
     grid.replaceChildren();
+    $("#btn-select").hidden = true;
     empty.hidden = false;
     empty.replaceChildren(el("strong", {}, "Crea il primo utente"), "Ogni utente ha la sua watchlist.", el("div", { style: "margin-top:14px" }, el("button", { class: "btn primary", onclick: openUsers }, "Crea utente")));
     $("#q").disabled = true;
+    renderSelectBar();
     return;
   }
   $("#q").disabled = false;
   $("#q").placeholder = `Aggiungi un film per ${user.name}…`;
   $("#list-title").textContent = `La lista di ${user.name}`;
+  $("#btn-select").hidden = user.movies.length === 0;
+  $("#btn-select").textContent = state.selecting ? "Fine" : "Seleziona";
 
-  const movies = [...user.movies]
-    .sort((a, b) => (b.added_date || "").localeCompare(a.added_date || ""))
-    .filter((m) => state.filter === "all" || (state.filter === "available") === isAvailable(m));
+  // la selezione tiene solo film che esistono ancora
+  for (const id of state.selected) if (!user.movies.some((m) => m.tmdb_id === id)) state.selected.delete(id);
 
+  const movies = visibleMovies(user);
+  grid.classList.toggle("selecting", state.selecting);
   grid.replaceChildren(...movies.map((m) => card(user, m)));
   empty.hidden = movies.length > 0;
   if (!movies.length) {
@@ -255,6 +272,7 @@ function renderList() {
         : [el("strong", {}, "La lista è vuota"), "Cerca un film qui sopra: ti avviso via mail quando arriva in streaming."]),
     );
   }
+  renderSelectBar();
 }
 
 function card(user, m) {
@@ -262,19 +280,36 @@ function card(user, m) {
   const status = el("div", { class: "status" }, el("span", { class: "skeleton" }));
   const tmdbUrl = `https://www.themoviedb.org/movie/${m.tmdb_id}`;
   const sub = [m.year, m.original_title && m.original_title !== m.title ? m.original_title : null].filter(Boolean).join(" · ");
+  const selected = state.selected.has(m.tmdb_id);
 
-  const node = el("article", { class: "card" },
+  const node = el("article", {
+      class: "card" + (selected ? " selected" : ""),
+      ...(state.selecting ? { role: "checkbox", "aria-checked": String(selected), tabindex: "0" } : {}),
+    },
+    state.selecting ? el("span", { class: "tick", "aria-hidden": "true" }) : null,
     pos,
     el("div", { class: "card-main" },
       el("div", { class: "card-top" },
-        el("div", { class: "card-title" }, el("a", { href: tmdbUrl, target: "_blank", rel: "noopener" }, m.title)),
-        el("button", { class: "icon-btn", title: "Togli dalla lista", "aria-label": `Togli ${m.title} dalla lista`, onclick: () => removeMovie(user, m) }, "🗑"),
+        el("div", { class: "card-title" }, state.selecting ? m.title : el("a", { href: tmdbUrl, target: "_blank", rel: "noopener" }, m.title)),
+        state.selecting ? null : el("button", { class: "icon-btn", title: "Togli dalla lista", "aria-label": `Togli ${m.title} dalla lista`, onclick: () => removeMovie(user, m) }, "🗑"),
       ),
       sub ? el("div", { class: "card-sub" }, sub) : null,
       el("div", { class: "card-sub" }, `Aggiunto il ${fmtDate(m.added_date)}`),
       status,
     ),
   );
+  if (state.selecting) {
+    const toggle = () => {
+      if (state.selected.has(m.tmdb_id)) state.selected.delete(m.tmdb_id);
+      else state.selected.add(m.tmdb_id);
+      const on = state.selected.has(m.tmdb_id);
+      node.classList.toggle("selected", on);
+      node.setAttribute("aria-checked", String(on));
+      renderSelectBar();
+    };
+    node.addEventListener("click", toggle);
+    node.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(); } });
+  }
 
   info(m.tmdb_id)
     .then((i) => {
@@ -293,16 +328,80 @@ function providerChips(list) {
 }
 
 function statusBits(m, prov) {
-  if (prov?.list.length) {
-    return [el("span", { class: "badge ok" }, "In streaming"), providerChips(prov.list)];
+  if (prov?.wanted.length) {
+    return [el("span", { class: "badge ok" }, "In streaming"), providerChips(prov.wanted)];
   }
   if (m.notified) {
     return [el("span", { class: "badge ok", title: `Notificato il ${fmtDate(m.notified.date)}` }, `Era su ${m.notified.providers.join(", ")}`)];
   }
   const bits = [el("span", { class: "badge wait" }, "In attesa")];
-  if (prov?.rentOrBuy) bits.push(el("span", { class: "card-sub" }, "per ora solo noleggio/acquisto"));
+  if (prov?.watchOnly.length) bits.push(el("span", { class: "badge sky", title: "Lo segnalo, ma aspetto una delle altre piattaforme" }, "C'è su"), providerChips(prov.watchOnly));
+  else if (!prov && m.watch_only) bits.push(el("span", { class: "badge sky" }, `C'era su ${m.watch_only.providers.join(", ")}`));
+  if (prov?.other.length) bits.push(el("span", { class: "card-sub note" }, `anche su ${prov.other.map((p) => p.name).join(", ")} (non conta)`));
+  else if (prov?.rentOrBuy && !prov.watchOnly.length) bits.push(el("span", { class: "card-sub note" }, "per ora solo noleggio/acquisto"));
   return bits;
 }
+
+// ---------- selezione multipla ----------
+
+function startSelecting() {
+  state.selecting = true;
+  state.selected.clear();
+  renderList();
+}
+
+function stopSelecting() {
+  state.selecting = false;
+  state.selected.clear();
+}
+
+function renderSelectBar() {
+  const bar = $("#select-bar");
+  bar.hidden = !state.selecting;
+  if (!state.selecting) return;
+  const n = state.selected.size;
+  const user = currentUser();
+  const visible = user ? visibleMovies(user) : [];
+  const allOn = visible.length > 0 && visible.every((m) => state.selected.has(m.tmdb_id));
+  $("#select-count").textContent = n === 0 ? "Tocca i film da togliere" : n === 1 ? "1 selezionato" : `${n} selezionati`;
+  $("#select-all").textContent = allOn ? "Nessuno" : "Tutti";
+  $("#select-del").disabled = n === 0;
+  $("#select-del").textContent = n ? `Togli ${n}` : "Togli";
+}
+
+$("#btn-select").addEventListener("click", () => {
+  if (state.selecting) { stopSelecting(); renderList(); } else startSelecting();
+});
+$("#select-cancel").addEventListener("click", () => { stopSelecting(); renderList(); });
+$("#select-all").addEventListener("click", () => {
+  const visible = visibleMovies(currentUser());
+  const allOn = visible.every((m) => state.selected.has(m.tmdb_id));
+  for (const m of visible) allOn ? state.selected.delete(m.tmdb_id) : state.selected.add(m.tmdb_id);
+  renderList();
+});
+$("#select-del").addEventListener("click", async () => {
+  const user = currentUser();
+  const ids = new Set(state.selected);
+  const titles = user.movies.filter((m) => ids.has(m.tmdb_id)).map((m) => m.title);
+  if (!titles.length) return;
+  const preview = titles.slice(0, 5).map((t) => `«${t}»`).join(", ") + (titles.length > 5 ? ` e altri ${titles.length - 5}` : "");
+  const ok = await confirmDialog(`Togliere ${titles.length === 1 ? "1 film" : `${titles.length} film`}?`, `${preview} escono dalla lista di ${user.name}.`, "Togli");
+  if (!ok) return;
+  try {
+    await mutate((db) => {
+      const u = db.users.find((x) => x.id === user.id);
+      if (u) u.movies = u.movies.filter((x) => !ids.has(x.tmdb_id));
+    }, titles.length === 1 ? `web: ${user.name} toglie "${titles[0]}"` : `web: ${user.name} toglie ${titles.length} film`);
+    stopSelecting();
+    renderList();
+    toast(titles.length === 1 ? `«${titles[0]}» tolto dalla lista` : `${titles.length} film tolti dalla lista`);
+  } catch (e) {
+    handleError(e);
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && state.selecting && !document.querySelector("dialog[open]")) { stopSelecting(); renderList(); }
+});
 
 // ---------- azioni ----------
 
@@ -329,8 +428,9 @@ async function addMovie(user, d, prov) {
     poster_path: d.poster_path || null,
     added_date: today(),
   };
-  // Già in streaming: lo sai già, niente mail domani.
-  if (prov.list.length) entry.notified = { date: today(), providers: prov.list.map((p) => p.name), on_add: true };
+  // Quello che vedi già nella scheda non arriva anche per mail.
+  if (prov.wanted.length) entry.notified = { date: today(), providers: prov.wanted.map((p) => p.name), on_add: true };
+  else if (prov.watchOnly.length) entry.watch_only = { date: today(), providers: prov.watchOnly.map((p) => p.name), on_add: true };
   await mutate((db) => {
     const u = db.users.find((x) => x.id === user.id);
     if (!u) throw new Error("Utente non trovato: forse è stato eliminato");
@@ -493,7 +593,7 @@ async function pick(i) {
   try {
     const d = await tmdb.details(r.id);
     if (!$("#dlg-add").open) return;
-    body.replaceChildren(detailView(d, pickProviders(d["watch/providers"]?.results), user));
+    body.replaceChildren(detailView(d, pickProviders(d["watch/providers"]?.results, rules()), user));
   } catch (e) {
     $("#dlg-add").close();
     handleError(e);
@@ -507,15 +607,22 @@ function detailView(d, prov, user) {
 
   let avail;
   if (!prov) avail = el("div", { class: "avail" }, el("span", { class: "skeleton", style: "width:60%" }));
-  else if (prov.list.length)
+  else if (prov.wanted.length)
     avail = el("div", { class: "avail ok" },
       el("div", {}, el("strong", {}, "È già in streaming in Italia"), "Puoi guardarlo subito; se lo aggiungi lo stesso non ti arriva la mail."),
-      providerChips(prov.list));
-  else
-    avail = el("div", { class: "avail wait" },
-      el("div", {}, el("strong", {}, "Non ancora in streaming in Italia"),
-        prov.rentOrBuy ? "Per ora c'è solo a noleggio o acquisto. " : "",
-        "Ti arriva una mail quando esce su una piattaforma in abbonamento o gratis."));
+      providerChips(prov.wanted));
+  else {
+    const r = rules();
+    const waitFor = r.wanted.filter((w) => w !== "Max").join(", ") + (r.free ? " o gratis" : "");
+    avail = el("div", { class: prov.watchOnly.length ? "avail sky" : "avail wait" },
+      prov.watchOnly.length
+        ? el("div", {}, el("strong", {}, `C'è già su ${prov.watchOnly.map((p) => p.name).join(", ")}, ma continuo ad aspettare`), `Ti arriva una mail quando esce su ${waitFor}.`)
+        : el("div", {}, el("strong", {}, "Non ancora sulle tue piattaforme"),
+            prov.rentOrBuy && !prov.other.length ? "Per ora c'è solo a noleggio o acquisto. " : "",
+            `Ti arriva una mail quando esce su ${waitFor}.`),
+      prov.watchOnly.length ? providerChips(prov.watchOnly) : null,
+      prov.other.length ? el("div", { class: "small muted" }, `Anche su ${prov.other.map((p) => p.name).join(", ")}, che non conta.`) : null);
+  }
 
   const addBtn = el("button", { class: "btn primary", disabled: already || !prov ? true : null }, already ? "Già nella lista" : `Aggiungi alla lista di ${user.name}`);
   addBtn.addEventListener("click", async () => {

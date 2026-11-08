@@ -11,6 +11,8 @@
   --ok: #1f8a5b;
   --ok-soft: #dcf1e6;
   --danger: #c23b30;
+  --sky: #2563c9;
+  --sky-soft: #dfe9fb;
   --shadow: 0 1px 2px rgb(0 0 0 / .05), 0 8px 24px rgb(0 0 0 / .06);
   --radius: 14px;
   color-scheme: light;
@@ -29,6 +31,8 @@
     --ok: #4cc28b;
     --ok-soft: #173326;
     --danger: #ff6b5e;
+    --sky: #7fb0ff;
+    --sky-soft: #172a47;
     --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 10px 30px rgb(0 0 0 / .35);
     color-scheme: dark;
   }
@@ -217,6 +221,32 @@ dialog h3 { font-size: 18px; margin-bottom: 8px; }
 .users-list .u-name { font-weight: 600; flex: 1; }
 .users-list .u-n { color: var(--muted); font-size: 13px; }
 .row-form { display: flex; gap: 8px; }
+
+.list-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.badge.sky { background: var(--sky-soft); color: var(--sky); }
+.avail.sky { background: var(--sky-soft); }
+.card-sub.note { font-size: 12px; }
+
+/* Selezione multipla */
+.grid.selecting .card { cursor: pointer; user-select: none; position: relative; padding-left: 44px; }
+.grid.selecting .card:hover { border-color: var(--muted); }
+.card .tick {
+  position: absolute; left: 13px; top: 50%; translate: 0 -50%; width: 20px; height: 20px;
+  border: 2px solid var(--line); border-radius: 6px; background: var(--bg);
+}
+.card.selected { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); }
+.card.selected .tick { background: var(--danger); border-color: var(--danger); }
+.card.selected .tick::after {
+  content: ""; position: absolute; left: 5px; top: 1px; width: 5px; height: 10px;
+  border: solid #fff; border-width: 0 2px 2px 0; rotate: 45deg;
+}
+.select-bar {
+  position: sticky; bottom: 12px; z-index: 6; max-width: 1040px; margin: 0 auto;
+  width: calc(100% - 32px); display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px 10px 16px;
+  box-shadow: var(--shadow); font-weight: 600; font-size: 14px;
+}
+.select-actions { display: flex; gap: 6px; }
 
 .toast {
   position: fixed; left: 50%; bottom: 20px; translate: -50% 20px; opacity: 0; pointer-events: none;
