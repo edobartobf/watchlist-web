@@ -5,7 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
   <title>Watchlist</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+  <meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111214" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
   <script type="module" src="app.js"></script>
 </head>
@@ -36,6 +40,7 @@
       <div class="top-row">
         <div class="brand"><span aria-hidden="true">🎬</span> Watchlist</div>
         <div class="top-actions">
+          <button class="btn primary sm" id="btn-install" hidden>Installa</button>
           <button class="btn ghost sm" id="btn-check" title="Avvia subito il controllo e l'eventuale mail">Controlla ora</button>
           <button class="btn ghost sm" id="btn-users">Utenti</button>
           <button class="btn ghost sm" id="btn-logout">Esci</button>

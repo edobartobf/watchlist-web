@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#c7791a"/>
+  <g transform="translate(256 268)">
+    <!-- corpo del ciak -->
+    <rect x="-124" y="-34" width="248" height="152" rx="20" fill="#fff"/>
+    <path d="M-30 14 L46 42 L-30 70 Z" fill="#c7791a"/>
+    <!-- asta superiore, inclinata -->
+    <g transform="translate(-124 -48) rotate(-13)">
+      <clipPath id="arm"><rect x="0" y="-50" width="248" height="46" rx="10"/></clipPath>
+      <rect x="0" y="-50" width="248" height="46" rx="10" fill="#fff"/>
+      <g clip-path="url(#arm)" fill="#1c1b19">
+        <path d="M20 -50 h36 l-28 46 h-36 Z"/>
+        <path d="M92 -50 h36 l-28 46 h-36 Z"/>
+        <path d="M164 -50 h36 l-28 46 h-36 Z"/>
+        <path d="M236 -50 h36 l-28 46 h-36 Z"/>
+      </g>
+    </g>
+  </g>
+</svg>

@@ -2,6 +2,26 @@ import { decryptVault } from "./vault.js";
 import { GitHubStore, Tmdb, IMG, pickProviders, DEFAULT_RULES, rankResults } from "./api.js";
 import { DemoStore, DemoTmdb } from "./demo.js";
 
+// App installabile (Android: "Installa" nell'header o dal menu di Chrome).
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+let installPrompt = null;
+addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  document.querySelector("#btn-install").hidden = false;
+});
+addEventListener("appinstalled", () => {
+  installPrompt = null;
+  document.querySelector("#btn-install").hidden = true;
+});
+document.querySelector("#btn-install").addEventListener("click", async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  document.querySelector("#btn-install").hidden = true;
+});
+
 // config.js si carica qui e non con un tag <script>: GitHub Pages fa tenere i file
 // in cache fino a 10 minuti, e dopo aver rigenerato i token servirebbe Ctrl+Shift+R.
 async function loadConfig() {
